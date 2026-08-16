@@ -52,7 +52,7 @@ identified, you get a notification instead.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/omarchy-update-app-under-cursor.git
+git clone https://github.com/Razaroth/omarchy-update-app-under-cursor.git
 cd omarchy-update-app-under-cursor
 ./install.sh
 ```
