@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# omarchy:summary=Update the app under the cursor (SUPER + right-click)
+# Resolves the window under the cursor, finds the package owning its
+# executable (repo/AUR/flatpak/snap), and runs the update in a terminal so the
+# user can authenticate and watch the result. Browser web apps (e.g. Discord)
+# resolve to a matching native package instead of the browser binary.
+
+set -euo pipefail
+
+notify() {
+  omarchy-notification-send --app-name "App updater" -g "󰑓" -u "$1" "$2" "${3:-}" 2>/dev/null || true
+}
+
+# --- find the window under the cursor ---------------------------------------
+IFS=, read -r cursor_x cursor_y < <(hyprctl cursorpos | tr -d ' ')
+
+selected="$(
+  jq -c --argjson x "$cursor_x" --argjson y "$cursor_y" '
+    [ .[]
+      | select(.mapped and (.hidden | not) and .visible and .acceptsInput)
+      | select(($x >= .at[0] and $x < .at[0] + .size[0]) and ($y >= .at[1] and $y < .at[1] + .size[1]))
+      | { fh: .focusHistoryID, class: .class, initialClass: .initialClass, pid: .pid } ]
+    | sort_by(.fh)
+    | .[0] // empty
+  ' < <(hyprctl clients -j)
+)"
+
+if [[ -z $selected || $selected == "null" ]]; then
+  notify normal "Nothing under the cursor" "SUPER + right-click a window to update that app."
+  exit 0
+fi
+
+pid="$(jq -r '.pid' <<<"$selected")"
+class="$(jq -r '.class' <<<"$selected")"
+initial_class="$(jq -r '.initialClass' <<<"$selected")"
+
+# --- package resolution ------------------------------------------------------
+ppid_of() {
+  awk '{print $4}' "/proc/$1/stat" 2>/dev/null || true
+}
+
+find_flatpak() {
+  local p="$1" app
+  for _ in 1 2 3 4; do
+    app="$(flatpak ps --columns=application,pid 2>/dev/null | awk -v p="$p" 'NR>1 && $2 == p {print $1; exit}')"
+    [[ -n $app ]] && { echo "$app"; return 0; }
+    p="$(ppid_of "$p")"
+    [[ -n $p && $p != "0" ]] || break
+  done
+  return 1
+}
+
+find_snap() {
+  local p="$1" bin
+  for _ in 1 2 3 4; do
+    bin="$(cmdline_arg "$p" 1)"
+    if [[ $bin == *"/var/lib/snapd/snap/"* ]]; then
+      echo "$bin" | awk -F'/' '{print $6}'
+      return 0
+    fi
+    p="$(ppid_of "$p")"
+    [[ -n $p && $p != "0" ]] || break
+  done
+  return 1
+}
+
+cmdline_arg() {
+  tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | sed -n "${2:-1}p"
+}
+
+is_tool_binary() {
+  case "$(basename "$1")" in
+  bash | dash | sh | zsh | fish | python* | node* | deno | perl | ruby | lua* | php | bwrap | flatpak | snap | snap-exec | systemd | systemd-run | dbus-daemon | dbus-broker-launch | init) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+find_native() {
+  local p="$1" bin script pkg c
+  for _ in 1 2 3 4 5; do
+    bin="$(cmdline_arg "$p" 1)"
+    bin="${bin%% *}"
+    if [[ -n $bin ]]; then
+      if is_tool_binary "$bin"; then
+        script="$(cmdline_arg "$p" 2)"
+        if [[ -n $script && $script == /* && -f $script ]]; then
+          if pkg="$(pacman -Qo "$script" 2>/dev/null)"; then
+            pkg="${pkg#*owned by }"
+            pkg="${pkg%% *}"
+            [[ -n $pkg ]] && { echo "$pkg"; return 0; }
+          fi
+        fi
+      else
+        c="$bin"
+        [[ $c != /* ]] && c="$(command -v "$c" 2>/dev/null || true)"
+        for c in "$c" "/usr/bin/${bin##*/}" "/bin/${bin##*/}"; do
+          [[ -n $c && -e $c ]] || continue
+          case "$c" in
+          *"/var/lib/flatpak/"* | *"/var/lib/snapd/snap/"*) continue ;;
+          esac
+          if pkg="$(pacman -Qo "$c" 2>/dev/null)"; then
+            pkg="${pkg#*owned by }"
+            pkg="${pkg%% *}"
+            [[ -n $pkg ]] && { echo "$pkg"; return 0; }
+          fi
+        done
+      fi
+    fi
+    p="$(ppid_of "$p")"
+    [[ -n $p && $p != "0" ]] || break
+  done
+  return 1
+}
+
+resolve_package() {
+  local pkg="$1"
+  if pacman -Q "$pkg" >/dev/null 2>&1; then
+    if pacman -Qm "$pkg" >/dev/null 2>&1; then
+      printf 'aur\tupdate\tyay -S --cleanafter\t%s\n' "$pkg"
+    else
+      printf 'repo\tupdate\tsudo pacman -Sy\t%s\n' "$pkg"
+    fi
+  elif pacman -Si "$pkg" >/dev/null 2>&1; then
+    printf 'repo\tinstall\tsudo pacman -Sy\t%s\n' "$pkg"
+  elif yay -Si "$pkg" >/dev/null 2>&1; then
+    printf 'aur\tinstall\tyay -S --cleanafter\t%s\n' "$pkg"
+  fi
+}
+
+extract_webapp_name() {
+  local rest="$1" host app
+  rest="${rest#chrome-}"
+  rest="${rest#chromium-}"
+  rest="${rest#google-chrome-}"
+  rest="${rest#brave-}"
+  rest="${rest#microsoft-edge-}"
+  rest="${rest#vivaldi-}"
+  rest="${rest#opera-}"
+  rest="${rest#helium-}"
+  case "$rest" in
+  www.* | web.* | app.* | m.*) rest="${rest#*.}" ;;
+  esac
+  host="${rest%%[-_]*}"
+  app="${host%%.*}"
+  [[ -n $app ]] && printf '%s\n' "$app"
+}
+
+TERMINALS='^(foot|footclient|foot-server|alacritty|kitty|ghostty|wezterm|xterm|xterm-256color|urxvt|rxvt|rxvt-unicode|st-[0-9a-z-]+|konsole|gnome-terminal|gnome-terminal-server|tilix|terminator|termite|ptyxis|kgx|cosmic-term|rio|contour)$'
+
+find_terminal_package() {
+  local p="$1" best="" child result bin
+  bin="$(cmdline_arg "$p" 1)"
+  [[ $bin != /* ]] && bin="$(command -v "$bin" 2>/dev/null || true)"
+  case "$bin" in
+  *"/var/lib/flatpak/"* | *"/var/lib/snapd/snap/"*)
+    return 1
+    ;;
+  esac
+  for _ in $(seq 1 12); do
+    if result="$(find_native "$p" 2>/dev/null)"; then
+      best="$result"
+    fi
+    child="$(pgrep -P "$p" 2>/dev/null | tail -n1)"
+    [[ -n $child ]] || break
+    p="$child"
+  done
+  [[ -n $best ]] && printf '%s\n' "$best" && return 0
+  return 1
+}
+
+webapp_name=""
+for c in "$class" "$initial_class"; do
+  case "$c" in
+  chrome-* | chromium-* | google-chrome-* | brave-* | microsoft-edge-* | vivaldi-* | opera-* | helium-*)
+    webapp_name="$(extract_webapp_name "$c")"
+    break
+    ;;
+  esac
+done
+
+verb=""
+label=""
+cmd=""
+
+if [[ -n $webapp_name ]]; then
+  info="$(resolve_package "$webapp_name")"
+  if [[ -z $info ]]; then
+    notify normal "No native $webapp_name package" "'$webapp_name' is a web app running in a browser; nothing matching it could be installed or updated."
+    exit 0
+  fi
+  IFS=$'\t' read -r origin verb runner pkg <<<"$info"
+  cmd="$runner '$pkg'"
+  label="$pkg ($origin)"
+elif [[ $class =~ $TERMINALS || $initial_class =~ $TERMINALS ]]; then
+  if pkg="$(find_terminal_package "$pid")"; then
+    info="$(resolve_package "$pkg")"
+    if [[ -z $info ]]; then
+      notify normal "Couldn't identify app" "No package found for the app running in this terminal."
+      exit 0
+    fi
+    IFS=$'\t' read -r origin verb runner resolved <<<"$info"
+    cmd="$runner '$resolved'"
+    label="$resolved ($origin)"
+  else
+    notify normal "Couldn't identify app" "No package found for the app running in this terminal."
+    exit 0
+  fi
+elif app="$(find_flatpak "$pid")"; then
+  verb="update"
+  cmd="flatpak update '$app'"
+  label="$app (flatpak)"
+elif app="$(find_snap "$pid")"; then
+  verb="update"
+  cmd="sudo snap refresh '$app'"
+  label="$app (snap)"
+elif pkg="$(find_native "$pid")"; then
+  info="$(resolve_package "$pkg")"
+  if [[ -z $info ]]; then
+    notify normal "Couldn't identify app" "No package found for window: $class"
+    exit 0
+  fi
+  IFS=$'\t' read -r origin verb runner resolved <<<"$info"
+  cmd="$runner '$resolved'"
+  label="$resolved ($origin)"
+else
+  notify normal "Couldn't identify app" "No package found for window: $class"
+  exit 0
+fi
+
+[[ $verb == "install" ]] && verb="Installing" || verb="Updating"
+
+# --- run the update in a terminal so the user can authenticate --------------
+export OMARCHY_UPDATE_LABEL="$label"
+export OMARCHY_UPDATE_CMD="$cmd"
+export OMARCHY_UPDATE_VERB="$verb"
+
+notify low "$verb $label" "Running: $cmd"
+
+omarchy-launch-terminal sh -c 'printf "%s: %s\n\n" "$OMARCHY_UPDATE_VERB" "$OMARCHY_UPDATE_LABEL"; eval "$OMARCHY_UPDATE_CMD"; status=$?; printf "\nFinished (exit %s).\n" "$status"; read -rp "Press Enter to close this window." -n1' 2>/dev/null || notify normal "Update failed to start" "Couldn't open a terminal for: $cmd"
