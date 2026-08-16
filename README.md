@@ -52,7 +52,7 @@ identified, you get a notification instead.
 ## Install
 
 ```bash
-git clone https://github.com/Razaroth/omarchy-update-app-under-cursor.git
+git clone https://github.com/Razaroth/omarchy-update-app-under-cursor
 cd omarchy-update-app-under-cursor
 ./install.sh
 ```
@@ -62,7 +62,7 @@ the repo carries a plugin `manifest.json`, so `omarchy plugin add` will clone,
 validate, and register it under `~/.config/omarchy/plugins/`:
 
 ```bash
-omarchy plugin add https://github.com/Razaroth/omarchy-update-app-under-cursor.git --enable
+omarchy plugin add https://github.com/Razaroth/omarchy-update-app-under-cursor --enable
 ```
 
 The plugin is a headless `service` (no UI); run `install.sh` as well so the
