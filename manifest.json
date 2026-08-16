@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "razaroth.update-app-under-cursor",
+  "name": "Update App Under Cursor",
+  "version": "1.0.0",
+  "author": "Razaroth",
+  "license": "MIT",
+  "description": "Resolves the window under the cursor to the package that owns it and runs its update in a terminal (SUPER + right-click).",
+  "kinds": ["service"],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

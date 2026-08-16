@@ -57,6 +57,18 @@ cd omarchy-update-app-under-cursor
 ./install.sh
 ```
 
+Or install it as an [Omarchy shell plugin](https://github.com/basecamp/omarchy) —
+the repo carries a plugin `manifest.json`, so `omarchy plugin add` will clone,
+validate, and register it under `~/.config/omarchy/plugins/`:
+
+```bash
+omarchy plugin add https://github.com/Razaroth/omarchy-update-app-under-cursor.git --enable
+```
+
+The plugin is a headless `service` (no UI); run `install.sh` as well so the
+SUPER + right-click binding and the `omarchy-update-app-under-cursor` command
+are available on your PATH.
+
 The installer:
 
 - copies the script to `~/.local/bin/omarchy-update-app-under-cursor`
